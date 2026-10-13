@@ -426,13 +426,16 @@ write_json() {
     chmod 600 "$file"
 }
 
-# Check Bash version (4.4+ required)
+# Check Bash version (3.2+ required — macOS 기본 /bin/bash 가 3.2)
 check_bash_version() {
     # PATH 의 bash 가 아니라 지금 이 스크립트를 돌리는 bash 를 본다 — LaunchAgent 는 PATH 에 옛 /bin/bash(3.2)만
     # 있어도 새 bash 의 절대경로로 실행되므로, PATH 를 보면 멀쩡한데도 멈춘다(brew bash 가 없는 맥에서).
+    # 기준이 3.2 인 이유: 이 스크립트는 애초에 3.2 타겟이고(CLAUDE.md), 4.x 전용 문법을 쓰지 않는다.
+    # 4.4 를 요구하던 시절엔 PATH 가 좁은 호출자(SwiftBar: /usr/bin:/bin 뿐)가 `env bash` 로 3.2 를 골라
+    # 멀쩡한 코드가 게이트에서 죽었다 — 위젯 표시는 되는데 전환만 조용히 실패했다(2026-10 실제 버그).
     local version="${BASH_VERSINFO[0]}.${BASH_VERSINFO[1]}"
-    if ! awk -v ver="$version" 'BEGIN { exit (ver >= 4.4 ? 0 : 1) }'; then
-        echo "Error: Bash 4.4+ required (found $version)"
+    if ! awk -v ver="$version" 'BEGIN { exit (ver >= 3.2 ? 0 : 1) }'; then
+        echo "Error: Bash 3.2+ required (found $version)"
         exit 1
     fi
 }
@@ -2784,7 +2787,7 @@ cron_script_path() {
     echo "$raw"
 }
 
-# Pick an absolute bash binary meeting the 4.4+ requirement. Cron's default
+# Pick an absolute bash binary meeting the 3.2+ requirement. Cron's default
 # PATH does not include Homebrew, so we must hard-code the full path in
 # the cron entry. `which bash` in the installing shell is preferred, then
 # common homebrew locations, then /bin/bash (likely 3.2 and rejected).
@@ -2798,7 +2801,7 @@ resolve_modern_bash() {
     for b in "${candidates[@]}"; do
         [[ -x "$b" ]] || continue
         ver=$("$b" -c 'printf "%s.%s" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"' 2>/dev/null || true)
-        if awk -v v="$ver" 'BEGIN { exit (v >= 4.4 ? 0 : 1) }' 2>/dev/null; then
+        if awk -v v="$ver" 'BEGIN { exit (v >= 3.2 ? 0 : 1) }' 2>/dev/null; then
             echo "$b"
             return 0
         fi
