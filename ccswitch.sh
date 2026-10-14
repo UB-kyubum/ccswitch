@@ -2790,7 +2790,7 @@ cron_script_path() {
 # Pick an absolute bash binary meeting the 3.2+ requirement. Cron's default
 # PATH does not include Homebrew, so we must hard-code the full path in
 # the cron entry. `which bash` in the installing shell is preferred, then
-# common homebrew locations, then /bin/bash (likely 3.2 and rejected).
+# common homebrew locations, then /bin/bash (3.2 — 이제 기준이 3.2 라 받아들인다).
 resolve_modern_bash() {
     local candidates=() b ver
     local which_bash
@@ -3136,6 +3136,16 @@ cmd_pool_add() {
         [[ "$(pool_dir "$p")" == "$dir" ]] && { echo "Error: $dir 는 풀 '$p' 가 쓰고 있다"; exit 1; }
     done
 
+    # 계정 번호를 먼저 확인한다. 예전엔 cmd_pool_set 이(= write_json 뒤에)
+    # 검증해서, 번호가 틀리면 에러는 나는데 accounts: [] 인 풀과 빈 폴더가
+    # 그대로 남았다(2026-10 보고).
+    local acct
+    for acct in "$@"; do
+        [[ "$acct" =~ ^[0-9]+$ ]] || { echo "Error: 계정 번호가 숫자가 아니다: $acct"; exit 1; }
+        jq -e --arg n "$acct" '.accounts[$n]' "$SEQUENCE_FILE" >/dev/null 2>&1 \
+            || { echo "Error: Account-$acct 이 없다 ($0 --list 로 확인)"; exit 1; }
+    done
+
     mkdir -p "$dir"
     chmod 700 "$dir"
     local it
@@ -3309,10 +3319,12 @@ cmd_tui() {
             # (9 에서 ↓ 가 안 먹고 ↑ 가 8 로 감). 화면과 같은 숫자 순으로 맞춘다.
             nums=($(pool_accounts | sort -n))
             eligible=""
-            for n in "${nums[@]}"; do
+            # bash 3.2 는 set -u 에서 빈 배열의 "${arr[@]}" 를 unbound 로 본다
+            # (4.4+ 는 허용). 계정 없는 풀에서 TUI 가 죽던 원인(2026-10 보고).
+            for n in ${nums[@]+"${nums[@]}"}; do
                 if [[ "$n" == "$cur" ]] || pool_eligible "$n"; then eligible+="$n "; fi
             done
-            [[ -z "$sel" ]] && sel="${cur:-${nums[0]}}"
+            [[ -z "$sel" ]] && sel="${cur:-${nums[0]:-}}"
             tui_build_view "$data" "$cur"
             view_dirty=0
         fi
@@ -3337,7 +3349,7 @@ cmd_tui() {
                 view_dirty=0
                 ;;
             [0-9])
-                for n in "${nums[@]}"; do [[ "$n" == "$key" ]] && sel="$key"; done
+                for n in ${nums[@]+"${nums[@]}"}; do [[ "$n" == "$key" ]] && sel="$key"; done
                 view_dirty=0
                 ;;
             ENTER|s)

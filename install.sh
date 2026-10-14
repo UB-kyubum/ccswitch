@@ -54,11 +54,15 @@ if (( uninstall )); then
         rm "$AGENT_PLIST"
         yellow "LaunchAgent 제거: ${AGENT_LABEL}"
     fi
-    sb_link="${SWIFTBAR_DIR}/ccswitch.10s.sh"
-    if [[ -L "$sb_link" ]]; then
+    # 사용자가 refresh 간격을 바꾸려고 ccswitch.<N>s.sh 로 이름을 바꿔 두면
+    # 10s 만 지우던 예전 코드는 그 링크를 남겼다(2026-10 보고).
+    # 우리 스크립트를 가리키는 링크만 골라 지운다.
+    for sb_link in "${SWIFTBAR_DIR}"/ccswitch.*s.sh; do
+        [[ -L "$sb_link" ]] || continue
+        [[ "$(readlink "$sb_link")" == *"ccswitch-statusbar" ]] || continue
         rm "$sb_link"
-        yellow "SwiftBar 플러그인 심볼릭 링크 제거"
-    fi
+        yellow "SwiftBar 플러그인 심볼릭 링크 제거: $(basename "$sb_link")"
+    done
     green "uninstall 완료. ~/.claude-switch-backup 데이터는 그대로 보존됨."
     exit 0
 fi
