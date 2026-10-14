@@ -16,7 +16,13 @@ REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 BIN_DIR="${HOME}/.local/bin"
 AGENT_LABEL="com.ccswitch.auto-switch"
 AGENT_PLIST="${HOME}/Library/LaunchAgents/${AGENT_LABEL}.plist"
-SWIFTBAR_DIR="${HOME}/Library/Application Support/SwiftBar/Plugins"
+# SwiftBar 는 첫 실행 때 사용자가 고른 플러그인 폴더를 com.ameba.SwiftBar 의
+# PluginDirectory 에 저장한다. 그 값을 먼저 보고, 없으면 기본 자리를 쓴다 —
+# 폴더를 고정해 두면 「설치만 하고 아직 안 띄운」 맥에서 바로 실패했다(2026-10 보고).
+SWIFTBAR_DEFAULT_DIR="${HOME}/Library/Application Support/SwiftBar/Plugins"
+SWIFTBAR_DIR=$(defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null || true)
+SWIFTBAR_DIR="${SWIFTBAR_DIR/#\~/$HOME}"
+[[ -n "$SWIFTBAR_DIR" ]] || SWIFTBAR_DIR="$SWIFTBAR_DEFAULT_DIR"
 
 want_agent=0
 want_statusbar=0
@@ -120,10 +126,15 @@ fi
 if (( want_statusbar )); then
     echo
     if [[ ! -d "$SWIFTBAR_DIR" ]]; then
-        yellow "SwiftBar 플러그인 디렉토리를 찾을 수 없습니다: $SWIFTBAR_DIR"
-        echo "  먼저 SwiftBar 를 설치하세요:  brew install --cask swiftbar"
-        echo "  그 후 --statusbar 로 재실행."
-    else
+        # SwiftBar 를 아직 안 띄워 폴더가 없을 뿐일 수 있다. 기본 자리를 만들어
+        # PluginDirectory 에 적어 두면, 나중에 SwiftBar 를 처음 띄울 때 그대로 쓴다.
+        mkdir -p "$SWIFTBAR_DEFAULT_DIR"
+        SWIFTBAR_DIR="$SWIFTBAR_DEFAULT_DIR"
+        defaults write com.ameba.SwiftBar PluginDirectory -string "$SWIFTBAR_DIR" 2>/dev/null || true
+        yellow "SwiftBar 플러그인 폴더를 만들었습니다: $SWIFTBAR_DIR"
+        echo "  SwiftBar 가 없다면:  brew install --cask swiftbar"
+    fi
+    if [[ -d "$SWIFTBAR_DIR" ]]; then
         sb_link="${SWIFTBAR_DIR}/ccswitch.10s.sh"
         ln -sfn "${BIN_DIR}/ccswitch-statusbar" "$sb_link"
         green "SwiftBar 플러그인 링크 생성 (10초 refresh): $sb_link"

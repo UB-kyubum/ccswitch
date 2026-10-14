@@ -3,9 +3,11 @@
 #
 # Install (one-time):
 #   brew install --cask swiftbar       # or use xbar
-#   open -a SwiftBar                   # creates ~/Library/Application Support/SwiftBar/Plugins/
-#   ln -s "$HOME/.local/bin/ccswitch-statusbar" \
-#         "$HOME/Library/Application Support/SwiftBar/Plugins/ccswitch.10s.sh"
+#   ./install.sh --statusbar           # finds SwiftBar's plugin folder, creates it if absent
+#   # Manual: the folder is whatever SwiftBar actually uses —
+#   #   SB=$(defaults read com.ameba.SwiftBar PluginDirectory \
+#   #        || echo "$HOME/Library/Application Support/SwiftBar/Plugins")
+#   #   ln -s "$HOME/.local/bin/ccswitch-statusbar" "$SB/ccswitch.10s.sh"
 #   # The "10s" suffix in the symlink filename = refresh interval. Adjust to taste.
 #
 # All data is read from $HOME/.claude-switch-backup/usage-cache/* with NO API

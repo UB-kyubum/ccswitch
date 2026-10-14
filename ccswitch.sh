@@ -3167,7 +3167,11 @@ cmd_pool_add() {
     fi
     chmod 600 "$dir/.claude.json"
 
-    local rel="${dir/#$HOME/\~}" updated
+    # bash 3.2 는 치환부의 \~ 에서 역슬래시를 그대로 남겨 «\~/…» 로 저장한다
+    # (4.x 는 ~ 만 남긴다). 그러면 상대 경로가 되어 풀 폴더를 못 찾는다.
+    # 변수로 넘기면 두 버전 모두 ~ 하나만 들어간다(2026-10 보고).
+    local tilde='~'
+    local rel="${dir/#$HOME/$tilde}" updated
     updated=$(jq --arg p "$name" --arg d "$rel" '.pools[$p] = {dir: $d, accounts: []}' "$SEQUENCE_FILE")
     write_json "$SEQUENCE_FILE" "$updated"
     cmd_pool_set "$name" "$@"

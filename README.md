@@ -231,17 +231,22 @@ CCSWITCH_HYSTERESIS_DELTA=5 ccswitch.sh --switch-lowest
 
 ## SwiftBar 위젯
 
-선택사항. SwiftBar 먼저 설치 (`brew install --cask swiftbar`) 한 다음:
+선택사항. SwiftBar 를 설치 (`brew install --cask swiftbar`) 한 다음:
 
 ```bash
 ./install.sh --statusbar
 ```
 
-또는 수동:
+SwiftBar 를 아직 한 번도 띄우지 않았어도 됩니다 — 플러그인 폴더가 없으면 기본
+자리(`~/Library/Application Support/SwiftBar/Plugins`)를 만들어 쓰고, SwiftBar 가
+이미 다른 폴더를 쓰고 있으면(`com.ameba.SwiftBar` 의 `PluginDirectory`) 그쪽에 겁니다.
+
+또는 수동 — 폴더는 SwiftBar 가 실제로 쓰는 곳으로:
 
 ```bash
-ln -s "$HOME/.local/bin/ccswitch-statusbar" \
-      "$HOME/Library/Application Support/SwiftBar/Plugins/ccswitch.10s.sh"
+SB=$(defaults read com.ameba.SwiftBar PluginDirectory \
+     || echo "$HOME/Library/Application Support/SwiftBar/Plugins")
+ln -s "$HOME/.local/bin/ccswitch-statusbar" "$SB/ccswitch.10s.sh"
 ```
 
 파일명의 `10s` 접미사가 refresh 간격입니다 — `60s`, `5m` 등으로 변경 가능. 위젯은 `~/.claude-switch-backup/usage-cache/` 만 읽으므로 빈도가 높아도 API 호출 비용 0.
