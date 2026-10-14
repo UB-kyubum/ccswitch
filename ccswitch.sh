@@ -84,10 +84,14 @@ why_acct() {
     printf '  %-3s %s\n' "$n" "$*" >&2
 }
 
-# cold-warmup 후보인가: 5h 미사용 + 5h 리셋 시각 미상 + 7d 에 실질 여유.
+# cold-warmup 후보인가: 실측(status=ok) + 5h 미사용 + 5h 리셋 시각 미상 + 7d 에 실질 여유.
 # picker 와 두 곳의 사유 메시지가 반드시 같은 판정을 써야 표와 실제가 어긋나지 않는다.
+# 캐시 추정치는 cold 로 치지 않는다: 지난 5h 창이 끝났다는 것만으로 0 이 되므로 그 뒤에
+# 누가 썼는지 모른다(2026-10-14: 토큰 만료로 추정치 「5h 0」 이던 15번(실제 5h 100%)이
+# cold 로 뽑혀 5h 26%·7d 7% 인 9번을 이겼다).
 is_cold_candidate() {
-    local five="$1" five_rem="$2" seven="$3"
+    local five="$1" five_rem="$2" seven="$3" status="$4"
+    [[ "$status" == "ok" ]] || return 1
     [[ "$five" == "0" ]] || return 1
     [[ -z "$five_rem" || "$five_rem" == "0" ]] || return 1
     [[ "$seven" =~ ^[0-9]+$ ]] || return 1
@@ -1449,12 +1453,16 @@ pick_from_usage_data() {
         # Tie-break: smaller seven_rem wins (closer 7d reset = the
         # account's headroom is about to refresh anyway, so spend it
         # first rather than burning a slot with weeks of cap left).
-        if ! is_cold_candidate "$five" "$five_rem" "$seven"; then
+        if ! is_cold_candidate "$five" "$five_rem" "$seven" "$status"; then
             if [[ "$five" == "0" && ( -z "$five_rem" || "$five_rem" == "0" ) ]]; then
-                why_acct "$num" "cold 제외: 7d ${seven}% >= COLD_MAX_SEVEN(${COLD_MAX_SEVEN})"
+                if [[ "$status" != "ok" ]]; then
+                    why_acct "$num" "cold 제외: 실측 없음(status=${status}) — 5h 0 은 추정치"
+                else
+                    why_acct "$num" "cold 제외: 7d ${seven}% >= COLD_MAX_SEVEN(${COLD_MAX_SEVEN})"
+                fi
             fi
         fi
-        if is_cold_candidate "$five" "$five_rem" "$seven"; then
+        if is_cold_candidate "$five" "$five_rem" "$seven" "$status"; then
             if fable_priority_enabled \
                && [[ "$fable_eff" =~ ^[0-9]+$ ]] && (( fable_eff < 100 )); then
                 # Fable 여유 있는 cold — 최우선 그룹 (Fable 우선 모드일 때만).
@@ -2232,7 +2240,7 @@ cmd_switch_lowest() {
     target_seven_rem=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $9}')
     if [[ "$target_status" == "unavailable" ]]; then
         echo "Decision: rotating to stale Account-$target (idle ≥1h, token expired — switching so Claude Code refreshes it)."
-    elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven"; then
+    elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven" "$target_status"; then
         echo "Decision: warming up cold Account-$target (5h window untouched — touching now starts the clock for a future reset)."
     elif is_expiring_candidate "$target_seven" "$target_seven_rem"; then
         echo "Decision: using Account-$target before its weekly window resets in $(( target_seven_rem / 3600 ))h (7d ${target_seven}% — the rest would be wasted)."
@@ -2454,7 +2462,7 @@ predict_next_target() {
         fi
         if [[ "$target_status" == "unavailable" ]]; then
             echo "Next target: Account-$target (stale-token refresh)"
-        elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven"; then
+        elif is_cold_candidate "$target_five" "$target_five_rem" "$target_seven" "$target_status"; then
             echo "Next target: Account-$target (cold-warmup — 5h window untouched${fable_note})"
         elif is_expiring_candidate "$target_seven" "$target_seven_rem"; then
             echo "Next target: Account-$target (expiring — 7d resets in $(( target_seven_rem / 3600 ))h, ${target_seven}% used${fable_note})"
