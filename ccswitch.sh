@@ -2219,12 +2219,28 @@ cmd_switch_lowest() {
         echo "Decision: current Account-$current_account is live and healthy (5h ${cur_five}% / 7d ${cur_seven}%); target Account-$target has no live data (status=$target_status_pre) — staying."
         return 0
     fi
-    if (( cur_saturated == 0 )) \
+    # expiring 은 hysteresis 를 우회한다. hysteresis 는 「이득이 미미하면 세션을
+    # 바꾸지 말자」는 규칙이라 adjusted 차이로 판단하는데, expiring 의 근거는
+    # 「주간 여유가 곧 사라진다」라 기준이 다르다. 많이 쓴 계정일수록 adjusted 가
+    # 높으니, 그대로 두면 expiring 계정은 구조적으로 관문을 못 넘는다
+    # (2026-10: 7d 65%·리셋 13시간 남은 계정이 delta -38 로 막혔다).
+    # 값이 아래 "Tier-aware decision message" 에서야 채워지므로 여기서 직접 읽는다.
+    local tgt_seven tgt_seven_rem expiring_bypass=0
+    tgt_seven=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $4}')
+    tgt_seven_rem=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$target" '$1==n{print $9}')
+    is_expiring_candidate "$tgt_seven" "$tgt_seven_rem" && expiring_bypass=1
+    if (( cur_saturated == 0 )) && (( expiring_bypass == 0 )) \
        && [[ "$current_status" == "ok" && "$target_status_pre" == "ok" \
           && "$current_adj" =~ ^[0-9]+$ && "$target_adj" =~ ^[0-9]+$ ]]; then
         local delta=$((current_adj - target_adj))
         if (( delta < HYSTERESIS_DELTA )); then
-            echo "Decision: target Account-$target only ${delta}%p below current Account-$current_account (threshold ${HYSTERESIS_DELTA}%p); staying to avoid session churn."
+            # delta 가 음수면 target 이 「더 낮은」 게 아니라 더 높은(나쁜) 것이다.
+            # 그대로 찍으면 "only -38%p below" 처럼 말이 뒤집힌다.
+            if (( delta < 0 )); then
+                echo "Decision: target Account-$target is $(( -delta ))%p higher than current Account-$current_account; staying."
+            else
+                echo "Decision: target Account-$target only ${delta}%p below current Account-$current_account (threshold ${HYSTERESIS_DELTA}%p); staying to avoid session churn."
+            fi
             return 0
         fi
     fi
@@ -2443,11 +2459,19 @@ predict_next_target() {
             echo "Next target: Account-$current (staying — live and healthy; Account-$target has no live data, status=$target_status)"
             return 0
         fi
-        if (( cur_sat_p == 0 )) \
+        # cmd_switch_lowest 의 expiring 우회를 그대로 반영 — 미리보기와 실제가
+        # 어긋나면 표의 "Next target" 을 믿을 수 없게 된다.
+        local expiring_bypass_p=0
+        is_expiring_candidate "$target_seven" "$target_seven_rem" && expiring_bypass_p=1
+        if (( cur_sat_p == 0 )) && (( expiring_bypass_p == 0 )) \
            && [[ "$current_status_p" == "ok" && "$target_status" == "ok" \
               && "$current_adj_p" =~ ^[0-9]+$ && "$target_adj_p" =~ ^[0-9]+$ ]]; then
             local delta_p=$((current_adj_p - target_adj_p))
             if (( delta_p < HYSTERESIS_DELTA )); then
+                if (( delta_p < 0 )); then
+                    echo "Next target: Account-$current (staying — Account-$target is $(( -delta_p ))%p higher)"
+                    return 0
+                fi
                 echo "Next target: Account-$current (staying — Account-$target only ${delta_p}%p lower, below ${HYSTERESIS_DELTA}%p threshold)"
                 return 0
             fi
