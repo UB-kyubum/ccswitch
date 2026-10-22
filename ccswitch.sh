@@ -89,6 +89,22 @@ why_acct() {
 # 캐시 추정치는 cold 로 치지 않는다: 지난 5h 창이 끝났다는 것만으로 0 이 되므로 그 뒤에
 # 누가 썼는지 모른다(2026-10-14: 토큰 만료로 추정치 「5h 0」 이던 15번(실제 5h 100%)이
 # cold 로 뽑혀 5h 26%·7d 7% 인 9번을 이겼다).
+# 「사실상 포화」 기준. 5h 는 99% 에서 미리 넘어가 세션이 막히기 전에 옮긴다 —
+# 100% 를 기다리면 이미 멈춘 뒤라 매분 tick 이라도 한동안 막혀 있다(2026-10).
+# 7d 는 100 그대로: 주간 1% 는 5h 1% 보다 훨씬 큰 양이라 미리 버릴 이유가 적다.
+# 이 값은 긴급 전환·picker·hysteresis 관문·사유 메시지가 모두 같이 써야 한다 —
+# 한쪽만 99 면 99% 인 현재 계정을 picker 가 다시 골라 그 자리에 머문다.
+# (cache_saturated 는 MTD 과금 회피용이라 실제 100% 기준을 그대로 쓴다.)
+readonly EMERGENCY_FIVE="${CCSWITCH_EMERGENCY_FIVE:-99}"
+readonly EMERGENCY_SEVEN="${CCSWITCH_EMERGENCY_SEVEN:-100}"
+
+is_saturated() {
+    local five="$1" seven="$2"
+    [[ "$five" =~ ^[0-9]+$ ]] && (( five >= EMERGENCY_FIVE )) && return 0
+    [[ "$seven" =~ ^[0-9]+$ ]] && (( seven >= EMERGENCY_SEVEN )) && return 0
+    return 1
+}
+
 is_cold_candidate() {
     local five="$1" five_rem="$2" seven="$3" status="$4"
     [[ "$status" == "ok" ]] || return 1
@@ -1492,7 +1508,7 @@ pick_from_usage_data() {
         # back integer percentages), prefer the one whose 7d window is
         # closer to resetting. Otherwise the picker would lock onto the
         # lowest num forever and waste imminent-reset headroom.
-        if [[ "$five" != "100" && "$seven" != "100" ]]; then
+        if ! is_saturated "$five" "$seven"; then
             # Single healthy tier: handicap already lives in `adjusted`
             # (max + handicap), so a handicapped account competes on its
             # score alone — no separate lower tier. This is what lets a
@@ -2048,7 +2064,7 @@ cmd_tick_pool() {
             seven=$(echo "$util" | awk '{print $2}')
             [[ "$five" =~ ^[0-9]+$ ]] || five=0
             [[ "$seven" =~ ^[0-9]+$ ]] || seven=0
-            if (( five >= 100 || seven >= 100 )); then
+            if is_saturated "$five" "$seven"; then
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Emergency: Account-$current saturated (5h=${five}% 7d=${seven}%) — switching now."
                 CCSWITCH_HYSTERESIS_DELTA=0 cmd_switch_lowest
                 return 0
@@ -2174,6 +2190,8 @@ cmd_switch_lowest() {
 
     # 이 풀에서 고를 수 있는 계정만 picker 에 넣는다(다른 풀이 쓰는 계정·풀 밖 계정 제외).
     data=$(echo "$data" | filter_pool_rows "$current_account")
+    warm_cold_targets "$current_account" touch <<<"$data"
+    data="$WARM_DATA"
     target=$(echo "$data" | pick_from_usage_data "$current_account")
 
     if [[ -z "$target" ]]; then
@@ -2206,8 +2224,7 @@ cmd_switch_lowest() {
     local cur_five cur_seven cur_saturated=0
     cur_five=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current_account" '$1==n{print $3}')
     cur_seven=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current_account" '$1==n{print $4}')
-    if [[ "$cur_five" =~ ^[0-9]+$ ]] && (( cur_five >= 100 )); then cur_saturated=1; fi
-    if [[ "$cur_seven" =~ ^[0-9]+$ ]] && (( cur_seven >= 100 )); then cur_saturated=1; fi
+    is_saturated "$cur_five" "$cur_seven" && cur_saturated=1
     if (( cur_saturated == 1 )); then
         echo "Note: current Account-$current_account is saturated (5h ${cur_five}% / 7d ${cur_seven}%) — bypassing hysteresis."
     fi
@@ -2260,7 +2277,7 @@ cmd_switch_lowest() {
         echo "Decision: warming up cold Account-$target (5h window untouched — touching now starts the clock for a future reset)."
     elif is_expiring_candidate "$target_seven" "$target_seven_rem"; then
         echo "Decision: using Account-$target before its weekly window resets in $(( target_seven_rem / 3600 ))h (7d ${target_seven}% — the rest would be wasted)."
-    elif [[ "$target_five" == "100" || "$target_seven" == "100" ]]; then
+    elif is_saturated "$target_five" "$target_seven"; then
         if [[ "$target_extra" == "true" ]]; then
             echo "Decision: switching to Account-$target (all candidates saturated; this one has extra-usage available)."
         else
@@ -2418,13 +2435,69 @@ cmd_set_handicap() {
     echo "Set handicap for Account-$account_num ($email): ${percent}%"
 }
 
+# cold 는 전환 대신 건드리기만 한다. picker 가 고른 계정이 cold(5h 미사용·리셋 미상)면
+# 그 계정으로 옮기지 않고 --refresh 방식(임시 폴더에서 claude -p 한 번)으로 건드려
+# 5h 클럭만 시작한 뒤 다시 고른다. 예전엔 cold 계정으로 전환해 앉아 있었는데, 실제로
+# 쓰기 전엔 클럭이 돌지 않아 그 계정이 계속 cold 로 재선택됐다(2026-10).
+#   $1 = 현재 계정, $2 = touch(실제로 건드림) | simulate(미리보기 — 건드리지 않음)
+#   stdin = filter_pool_rows 까지 거친 TSV
+#   결과(전역): WARM_DATA = 다시 고를 때 쓸 TSV, WARM_LIST = 건드린(건드릴) 계정들
+# 파이프로 부르면 서브셸이라 전역이 사라진다 — 반드시 `<<<"$data"` 로 부를 것.
+# 지금 계정이 포화면 하지 않는다: 긴급이면 cold 계정으로 곧장 옮기는 게 맞다.
+# 한 번에 최대 2개: 건드리는 동안 tick 이 멈춰 긴급 판정이 밀리므로 짧게 끊는다.
+WARM_DATA=""
+WARM_LIST=""
+warm_cold_targets() {
+    local current="$1" mode="$2" data t f fr sv st cf cs i
+    data=$(cat)
+    WARM_LIST=""
+    cf=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $3}')
+    cs=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $4}')
+    if ! is_saturated "$cf" "$cs"; then
+        for i in 1 2; do
+            t=$(echo "$data" | pick_from_usage_data "$current")
+            [[ -n "$t" && "$t" != "$current" ]] || break
+            f=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$t" '$1==n{print $3}')
+            fr=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$t" '$1==n{print $8}')
+            sv=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$t" '$1==n{print $4}')
+            st=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$t" '$1==n{print $7}')
+            is_cold_candidate "$f" "$fr" "$sv" "$st" || break
+            if [[ "$mode" == "touch" ]]; then
+                echo "Decision: cold Account-$t — 전환하지 않고 건드려 5h 클럭만 시작한다."
+                if ( CCSWITCH_REFRESH_TOUCH=1 cmd_refresh "$t" ); then
+                    data=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v OFS=$'\x1f' -v n="$t" '$1==n{$8=18000} {print}')
+                else
+                    # 못 건드렸으면(토큰 사망 등) 이번엔 후보에서 뺀다.
+                    data=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$t" '$1!=n')
+                fi
+            else
+                # 건드렸다고 치면 5h 창이 막 시작된 것이라 cold 가 아니다.
+                data=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v OFS=$'\x1f' -v n="$t" '$1==n{$8=18000} {print}')
+            fi
+            WARM_LIST+="$t "
+        done
+    fi
+    WARM_DATA="$data"
+}
+
 # Print a per-account usage table using gather_all_usage + render.
 # --switch-lowest 가 지금 할 일을 한 줄("Next target: ...")로 예측한다.
 # cmd_switch_lowest 와 같은 규칙(실측 유지·포화·hysteresis)을 따른다.
 # --show-usage 와 TUI 가 함께 쓴다 — 예측이 두 군데 있으면 한쪽만 고쳐져
 # 표시와 실제 동작이 어긋난다(2026-09: TUI 만 "Account-8" 을 계속 보여 줬다).
 # 입력: stdin 에 filter_pool_rows 까지 거친 TSV, $1 = 현재 계정.
+# cold 예열(warm_cold_targets)을 실제 전환과 똑같이 반영한 뒤 판단한다.
+# 출력은 한 줄이어야 한다 — TUI 가 「${next#Next target: }」로 통째로 받아 쓴다.
 predict_next_target() {
+    local current="$1" data msg
+    data=$(cat)
+    warm_cold_targets "$current" simulate <<<"$data"
+    msg=$(predict_next_target_core "$current" <<<"$WARM_DATA")
+    [[ -n "$WARM_LIST" ]] && msg+=" · cold Account ${WARM_LIST% } 는 건드리기만(전환 안 함)"
+    echo "$msg"
+}
+
+predict_next_target_core() {
     local current="$1" data target target_status
     data=$(cat)
     # Preview: which account would --switch-lowest pick right now?
@@ -2453,8 +2526,7 @@ predict_next_target() {
         local cf_p cs_p cur_sat_p=0
         cf_p=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $3}')
         cs_p=$(echo "$data" | /usr/bin/awk -F$'\x1f' -v n="$current" '$1==n{print $4}')
-        [[ "$cf_p" =~ ^[0-9]+$ ]] && (( cf_p >= 100 )) && cur_sat_p=1
-        [[ "$cs_p" =~ ^[0-9]+$ ]] && (( cs_p >= 100 )) && cur_sat_p=1
+        is_saturated "$cf_p" "$cs_p" && cur_sat_p=1
         if (( cur_sat_p == 0 )) && [[ "$current_status_p" == "ok" && "$target_status" != "ok" ]]; then
             echo "Next target: Account-$current (staying — live and healthy; Account-$target has no live data, status=$target_status)"
             return 0
@@ -2490,7 +2562,7 @@ predict_next_target() {
             echo "Next target: Account-$target (cold-warmup — 5h window untouched${fable_note})"
         elif is_expiring_candidate "$target_seven" "$target_seven_rem"; then
             echo "Next target: Account-$target (expiring — 7d resets in $(( target_seven_rem / 3600 ))h, ${target_seven}% used${fable_note})"
-        elif [[ "$target_five" == "100" || "$target_seven" == "100" ]]; then
+        elif is_saturated "$target_five" "$target_seven"; then
             if [[ "$target_extra" == "true" ]]; then
                 echo "Next target: Account-$target (saturated but has extra-usage)"
             else
@@ -2717,7 +2789,9 @@ cmd_refresh() {
             echo "  Account-$n  백업 없음 — 재로그인 후 --add-account 필요"; skip=$((skip+1)); continue
         fi
         old_exp=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$creds" 2>/dev/null || echo 0)
-        if (( old_exp > now_ms + 600000 )); then
+        # 터칭 모드(cold 예열)는 토큰이 멀쩡해도 건드린다 — 목적이 갱신이 아니라
+        # claude 를 한 번 돌려 5h 창을 시작하는 것이다.
+        if [[ "${CCSWITCH_REFRESH_TOUCH:-0}" != 1 ]] && (( old_exp > now_ms + 600000 )); then
             echo "  Account-$n  아직 유효 — 건너뜀"; skip=$((skip+1)); continue
         fi
         if cache_saturated "$n"; then
@@ -2739,7 +2813,10 @@ cmd_refresh() {
         fi
         # 실패(갱신 불가 등)해도 set -e 로 스크립트가 죽지 않게 rc 를 따로 받는다.
         rc=0
-        out=$(cd "$D" && perl -e 'alarm shift; exec @ARGV' 90 \
+        # 터칭은 tick 안에서 돌아 그동안 긴급 판정이 밀리므로 짧게 끊는다.
+        local tmo=90
+        [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]] && tmo=30
+        out=$(cd "$D" && perl -e 'alarm shift; exec @ARGV' "$tmo" \
             env CLAUDE_CONFIG_DIR="$D" "$bin" -p --model haiku "ok" </dev/null 2>&1) || rc=$?
         new=$(security find-generic-password -s "$svc" -a "$USER" -w 2>/dev/null || true)
         [[ -z "$new" && -f "$D/.credentials.json" ]] && new=$(cat "$D/.credentials.json")
@@ -2753,6 +2830,11 @@ cmd_refresh() {
         if (( new_exp > old_exp )) && [[ "$owner" == "$uuid"$'\t'"$org" ]]; then
             write_account_credentials "$n" "$email" "$new"
             echo "  Account-$n  ✅ 갱신 ($email, 만료 $(date -r $((new_exp / 1000)) '+%m-%d %H:%M'))"
+            ok=$((ok+1))
+        elif [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]] && (( rc == 0 )) && (( new_exp <= old_exp )); then
+            # 토큰은 그대로(아직 유효해 갱신할 필요가 없었다)지만 claude 가 한 번
+            # 돌았으니 5h 창은 시작됐다. 터칭의 목적은 이것이라 성공이다.
+            echo "  Account-$n  ✅ 터칭 — 5h 클럭 시작 ($email)"
             ok=$((ok+1))
         else
             first=$( { echo "$out" | grep -v '^Warning: no stdin' || true; } | head -1 | cut -c1-70 )
@@ -2770,7 +2852,16 @@ cmd_refresh() {
     done
     trap - EXIT
     echo
-    echo "갱신 $ok · 실패 $fail · 건너뜀 $skip"
+    if [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]]; then
+        echo "터칭 $ok · 실패 $fail · 건너뜀 $skip"
+    else
+        echo "갱신 $ok · 실패 $fail · 건너뜀 $skip"
+    fi
+    # 터칭 모드는 성공 여부를 종료 코드로 돌려준다 — 부른 쪽이 「건드렸으니
+    # cold 가 아니다」와 「못 건드렸으니 후보에서 뺀다」를 가른다.
+    if [[ "${CCSWITCH_REFRESH_TOUCH:-0}" == 1 ]]; then
+        (( ok > 0 ))
+    fi
 }
 
 cmd_sync_current() {
@@ -3016,7 +3107,7 @@ cmd_agent_install() {
     echo "  plist:    $AGENT_PLIST"
     # echo "  schedule: every 60 seconds (StartInterval)"
     echo "  schedule: every 60s (--tick): emergency switch if the active"
-    echo "            account hits 100%, plus the normal hourly switch at :$(printf '%02d' "$(sweep_minute)")"
+    echo "            account hits 5h ${EMERGENCY_FIVE}% / 7d ${EMERGENCY_SEVEN}%, plus the normal hourly switch at :$(printf '%02d' "$(sweep_minute)")"
     echo "  log:      $CRON_LOG"
     echo ""
     echo "To trigger immediately:  launchctl kickstart $(agent_service_target)"
