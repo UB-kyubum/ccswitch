@@ -93,7 +93,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 |---|---|
 | `--add-account` | 현재 active 인 Claude Code 계정을 관리 대상으로 등록 |
 | `--remove-account <num>` | 관리 대상에서 제거 (백업 데이터는 보존) |
-| `--list` | 관리 중인 계정 목록, `*` 는 active 표시 |
+| `--list` | 관리 중인 계정 목록, `*` 는 active 표시. 계정마다 `[access 남은 시간 · refresh 남은 시간]` (API 호출 없음) |
 | `--switch` | `sequence.json` 순서대로 다음 계정 round-robin |
 | `--switch-to <num\|email\|"email (org)">` | 특정 계정으로 전환 |
 | `--switch-lowest` | picker 가 추천하는 계정으로 전환 |
