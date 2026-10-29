@@ -241,6 +241,44 @@ notify_switch_macos() {
     fi
 }
 
+notify_expired_token_macos() {
+    local num="$1" email="$2" token="$3"
+    [[ "$(detect_platform)" == "macos" ]] || return 0
+
+    local hash marker org_name org_uuid label msg
+    hash=$(printf '%s' "$token" | shasum -a 256 | cut -c1-64) || return 0
+    [[ -n "$hash" ]] || return 0
+    marker="$BACKUP_DIR/expiry-notifications/$num/$hash"
+    mkdir -p "$BACKUP_DIR/expiry-notifications/$num" || return 0
+    # 원문 토큰은 저장하지 않는다. mkdir로 동시 조회의 중복 알림도 막는다.
+    mkdir "$marker" 2>/dev/null || return 0
+
+    org_name=$(jq -r --arg n "$num" '.accounts[$n].organizationName // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_name=""
+    org_uuid=$(jq -r --arg n "$num" '.accounts[$n].organizationUuid // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_uuid=""
+    label="$email"
+    if [[ -n "$org_name$org_uuid" ]]; then
+        label+=" ($(format_org_label "$org_name" "$org_uuid" "$email"))"
+    fi
+    msg="$label 의 access token이 만료되었습니다. 해당 계정으로 전환해 Claude Code에서 토큰을 갱신한 뒤, ccswitch --sync-current로 백업을 동기화해 주세요."
+
+    local rc=0
+    if command -v terminal-notifier >/dev/null 2>&1; then
+        terminal-notifier -title "Claude Code 토큰 만료" -message "$msg" -sound default \
+            >/dev/null 2>&1 || rc=$?
+    else
+        osascript - "$msg" >/dev/null 2>&1 <<'APPLESCRIPT' || rc=$?
+on run argv
+    display notification (item 1 of argv) with title "Claude Code 토큰 만료" sound name "default"
+end run
+APPLESCRIPT
+    fi
+    # 전송 명령이 실패하면 다음 조회에서 재시도할 수 있도록 기록을 지운다.
+    if (( rc != 0 )); then
+        rmdir "$marker" 2>/dev/null || true
+    fi
+    return 0
+}
+
 # Format a short organization label.
 # Strategy: strip trailing "'s Organization"; if result is empty or collides
 # with the account email, fall back to the first 8 chars of organizationUuid.
@@ -914,6 +952,7 @@ fetch_account_utilization() {
         local now_ms=$(( $(date +%s) * 1000 ))
         if (( expires_at_ms > 0 && expires_at_ms <= now_ms )); then
             echo "  [Account-$account_num $email] accessToken expired; skipping" >&2
+            notify_expired_token_macos "$account_num" "$email" "$access_token"
             return 1
         fi
     fi
