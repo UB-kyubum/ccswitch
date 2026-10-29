@@ -261,40 +261,50 @@ notify_switch_macos() {
     fi
 }
 
-notify_expired_token_macos() {
-    local num="$1" email="$2" token="$3"
-    [[ "$(detect_platform)" == "macos" ]] || return 0
+# 백업 칸의 refresh token 이 만료됐으면 macOS 알림을 한 번 보냄.
+# access token 만료는 알리지 않음 — 쉬는 계정은 약 8시간이면 늘 만료 상태이고
+# --refresh 나 전환으로 되살아남. refresh 만료는 /login 후 --add-account 말고는 복구 불가.
+# 만료 전 무효화(다른 곳에서 회전·로그아웃)는 만료 시각만으로는 알 수 없음.
+notify_refresh_expired() {
+    local num="$1" email="$2" cred="$3"
+    local refresh_ms
+    refresh_ms=$(jq -r '.claudeAiOauth.refreshTokenExpiresAt // 0' <<<"$cred" 2>/dev/null || echo 0)
+    [[ "$refresh_ms" =~ ^[0-9]+$ ]] && (( refresh_ms > 0 && refresh_ms / 1000 <= $(date +%s) )) || return 0
+    command -v terminal-notifier >/dev/null 2>&1 || command -v osascript >/dev/null 2>&1 || return 0
 
-    local hash marker org_name org_uuid label msg
-    hash=$(printf '%s' "$token" | shasum -a 256 | cut -c1-64) || return 0
-    [[ -n "$hash" ]] || return 0
-    marker="$BACKUP_DIR/expiry-notifications/$num/$hash"
-    mkdir -p "$BACKUP_DIR/expiry-notifications/$num" || return 0
-    # 원문 토큰은 저장하지 않는다. mkdir로 동시 조회의 중복 알림도 막는다.
-    mkdir "$marker" 2>/dev/null || return 0
+    # 풀이 지금 쓰는 계정은 Claude Code 가 live 저장소에서 갱신하므로 백업 칸 시각과 무관.
+    local p
+    for p in $(pool_names); do
+        [[ "$(pool_current_account "$p" 2>/dev/null || true)" == "$num" ]] && return 0
+    done
 
+    # 같은 refresh token 은 한 번만 — 재로그인으로 토큰이 바뀌면 다시 알림 대상.
+    # 전송이 실패해도 기록은 남김: LaunchAgent 처럼 알림 권한이 없는 곳에서 매분 재시도하지 않게.
+    # 원문 토큰은 저장하지 않음.
+    local hash marker_dir marker
+    hash=$(jq -r '.claudeAiOauth.refreshToken // ""' <<<"$cred" 2>/dev/null | shasum -a 256 | cut -c1-64) || return 0
+    marker_dir="$BACKUP_DIR/expiry-notified"
+    marker="$marker_dir/account-$num"
+    [[ -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$hash" ]] && return 0
+    mkdir -p "$marker_dir" && printf '%s\n' "$hash" > "$marker" || return 0
+
+    local org_name org_uuid label msg title="Claude Code 로그인 만료"
     org_name=$(jq -r --arg n "$num" '.accounts[$n].organizationName // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_name=""
     org_uuid=$(jq -r --arg n "$num" '.accounts[$n].organizationUuid // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_uuid=""
-    label="$email"
+    label="Account-$num $email"
     if [[ -n "$org_name$org_uuid" ]]; then
         label+=" ($(format_org_label "$org_name" "$org_uuid" "$email"))"
     fi
-    msg="$label 의 access token이 만료되었습니다. 해당 계정으로 전환해 Claude Code에서 토큰을 갱신한 뒤, ccswitch --sync-current로 백업을 동기화해 주세요."
+    msg="$label 의 로그인(refresh token)이 만료되었습니다. 이 계정으로 /login 한 뒤 ccswitch.sh --add-account 로 다시 등록해 주세요."
 
-    local rc=0
     if command -v terminal-notifier >/dev/null 2>&1; then
-        terminal-notifier -title "Claude Code 토큰 만료" -message "$msg" -sound default \
-            >/dev/null 2>&1 || rc=$?
+        terminal-notifier -title "$title" -message "$msg" -sound default >/dev/null 2>&1 || true
     else
-        osascript - "$msg" >/dev/null 2>&1 <<'APPLESCRIPT' || rc=$?
+        osascript - "$msg" "$title" >/dev/null 2>&1 <<'APPLESCRIPT' || true
 on run argv
-    display notification (item 1 of argv) with title "Claude Code 토큰 만료" sound name "default"
+    display notification (item 1 of argv) with title (item 2 of argv) sound name "default"
 end run
 APPLESCRIPT
-    fi
-    # 전송 명령이 실패하면 다음 조회에서 재시도할 수 있도록 기록을 지운다.
-    if (( rc != 0 )); then
-        rmdir "$marker" 2>/dev/null || true
     fi
     return 0
 }
@@ -1007,7 +1017,6 @@ fetch_account_utilization() {
         local now_ms=$(( $(date +%s) * 1000 ))
         if (( expires_at_ms > 0 && expires_at_ms <= now_ms )); then
             echo "  [Account-$account_num $email] accessToken expired; skipping" >&2
-            notify_expired_token_macos "$account_num" "$email" "$access_token"
             return 1
         fi
     fi
@@ -1205,6 +1214,7 @@ gather_all_usage() {
         local cred_cached config_backup
         cred_cached=$(read_account_credentials "$num" "$email")
         config_backup="$BACKUP_DIR/configs/.claude-config-${num}-${email}.json"
+        notify_refresh_expired "$num" "$email" "$cred_cached"
         if [[ ! -s "$config_backup" || -z "${cred_cached//[[:space:]]/}" ]]; then
             # 전환 불가 계정. 캐시 추정치로 채우면 "5h=0/7d=0" 처럼 보여 picker 가
             # 최우선으로 고른 뒤 perform_switch 에서 죽는다. 아예 후보에서 뺀다.
@@ -1836,6 +1846,7 @@ cmd_remove_account() {
             ;;
     esac
     rm -f "$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
+    rm -f "$BACKUP_DIR/expiry-notified/account-${account_num}"
     
     # Update sequence.json
     local updated_sequence
