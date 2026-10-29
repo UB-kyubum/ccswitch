@@ -581,6 +581,41 @@ creds_expires_at() {
     [[ "$e" =~ ^[0-9]+$ ]] && echo "$e" || echo 0
 }
 
+# 남은 시간(초) → "7h" / "27d" / "<1h". 음수면 "만료(12h 전)".
+format_token_remaining() {
+    local s="$1" a
+    a=$(( s < 0 ? -s : s ))
+    local d
+    if (( a >= 172800 )); then d="$(( a / 86400 ))d"
+    elif (( a >= 3600 )); then d="$(( a / 3600 ))h"
+    else d="<1h"
+    fi
+    (( s < 0 )) && echo "만료(${d} 전)" || echo "$d"
+}
+
+# --list 의 토큰 열. API 호출 없이 자격증명의 만료 시각만 읽음.
+# access 만료는 흔한 상태(쉬는 계정은 약 8시간이면 만료) — --refresh 나 전환으로 되살아남.
+# refresh 만료는 /login 후 --add-account 말고는 복구 불가.
+token_status_label() {
+    local cred="$1" now access_ms refresh_ms refresh_part
+    now=$(date +%s)
+    access_ms=$(creds_expires_at "$cred")
+    refresh_ms=$(jq -r '.claudeAiOauth.refreshTokenExpiresAt // 0' <<<"$cred" 2>/dev/null || echo 0)
+    [[ "$refresh_ms" =~ ^[0-9]+$ ]] || refresh_ms=0
+    if (( refresh_ms == 0 )); then
+        refresh_part="refresh ?"
+    elif (( refresh_ms / 1000 <= now )); then
+        refresh_part="refresh 만료 — /login 후 --add-account"
+    else
+        refresh_part="refresh $(format_token_remaining $(( refresh_ms / 1000 - now )))"
+    fi
+    if (( access_ms == 0 )); then
+        echo "access ? · $refresh_part"
+    else
+        echo "access $(format_token_remaining $(( access_ms / 1000 - now ))) · $refresh_part"
+    fi
+}
+
 # 토큰의 실제 주인 → "accountUuid<TAB>organizationUuid". 만료·폐기·네트워크 실패면 빈 값.
 # access token 의 주인은 바뀌지 않으므로, 한 번 확인한 토큰은 만료 시각까지 다시 묻지 않는다.
 # (예전엔 --show-usage·--switch-lowest 를 부를 때마다 profile API 를 불렀다.)
@@ -1889,6 +1924,13 @@ cmd_list() {
     fi
     echo ""
 
+    # 풀마다 지금 쓰는 계정은 Claude Code 가 live 저장소에서 갱신 — 백업 칸 만료 시각은 무의미.
+    local in_use=" " p pn
+    for p in $(pool_names); do
+        pn=$(pool_current_account "$p" 2>/dev/null || true)
+        [[ -n "$pn" ]] && in_use+="$pn "
+    done
+
     echo "Accounts:"
     local seq_nums
     seq_nums=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
@@ -1914,7 +1956,19 @@ cmd_list() {
             suffix=""
         fi
 
-        echo "${prefix}${num}: $email ($label)${suffix}"
+        local cred token
+        if [[ "$in_use" == *" $num "* ]]; then
+            token="사용 중"
+        else
+            cred=$(read_account_credentials "$num" "$email")
+            if [[ -z "${cred//[[:space:]]/}" ]]; then
+                token="백업 없음"
+            else
+                token=$(token_status_label "$cred")
+            fi
+        fi
+
+        echo "${prefix}${num}: $email ($label)${suffix}  [$token]"
     done <<< "$seq_nums"
     print_pools_line
 }
@@ -3596,7 +3650,7 @@ show_usage() {
     echo "  --pool-remove <name>                       풀 삭제 (로그인 정보는 백업 칸으로 되돌림)"
     echo "  --add-account                              Add current account to managed accounts"
     echo "  --remove-account <num>                     Remove account (number only, see --list)"
-    echo "  --list                                     List all managed accounts"
+    echo "  --list                                     List all managed accounts (with token expiry)"
     echo "  --switch                                   Rotate to next account in sequence"
     echo "  --switch-to <num|email|\"email (org)\">       Switch to specific account"
     echo "  --switch-lowest                            Switch to the account with lowest adjusted utilization"
