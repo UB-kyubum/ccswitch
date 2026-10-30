@@ -93,7 +93,7 @@ Next target: Account-3 (cold-warmup — 5h window untouched)
 |---|---|
 | `--add-account` | 현재 active 인 Claude Code 계정을 관리 대상으로 등록 |
 | `--remove-account <num>` | 관리 대상에서 제거 (백업 데이터는 보존) |
-| `--list` | 관리 중인 계정 목록, `*` 는 active 표시 |
+| `--list` | 관리 중인 계정 목록, `*` 는 active 표시. 계정마다 `[access 남은 시간 · refresh 남은 시간]` (API 호출 없음) |
 | `--switch` | `sequence.json` 순서대로 다음 계정 round-robin |
 | `--switch-to <num\|email\|"email (org)">` | 특정 계정으로 전환 |
 | `--switch-lowest` | picker 가 추천하는 계정으로 전환 |
@@ -283,6 +283,8 @@ rm -rf ~/.claude-switch-backup
 ## 문제 해결
 
 **"accessToken expired; skipping"** — 해당 계정의 OAuth 토큰 만료. ccswitch 는 토큰 refresh 를 직접 수행하지 않습니다. 그 계정으로 한 번 switch 하면 Claude Code 가 다음 호출 시 refresh 합니다. picker 의 `stale` tier 가 정확히 이런 만료 계정을 우선 선택하도록 설계됨.
+
+**「Claude Code 로그인 만료」 알림** — 백업 칸의 refresh token 이 만료된 계정(`--list` 에 `refresh 만료` 로 표시). access token 만료와 달리 전환이나 `--refresh` 로는 되살아나지 않는다. 그 계정으로 `/login` 한 뒤 `ccswitch.sh --add-account`. 사용량을 조회할 때(`--show-usage`·TUI·tick) 판정하며, 풀이 지금 쓰는 계정은 제외, 같은 토큰은 한 번만 알린다. 만료 시각 전에 무효가 된 토큰(다른 곳에서 회전·로그아웃)은 알 수 없다. 알림 권한이 없으면 표시되지 않는다.
 
 **`/status` 는 새 계정인데 quota 는 옛 계정에서 줄어듦 / 두 칸의 사용량이 똑같음** — macOS 에는 자격증명 저장소가 둘 있다(키체인, 그리고 키체인이 잠긴 ssh 세션이 쓰는 `~/.claude/.credentials.json`). 둘이 서로 다른 계정이 될 수 있어서, ccswitch 는 두 저장소의 토큰 주인을 프로필 API 로 확인해 **주인의 칸에만** 백업한다. 예전 버전은 `.claude.json` 이 말하는 계정 칸에 키체인 값을 무조건 써서 남의 토큰이 들어갔다. 이미 섞인 칸은 그 계정으로 다시 로그인한 뒤 `--sync-current`.
 

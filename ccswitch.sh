@@ -261,6 +261,54 @@ notify_switch_macos() {
     fi
 }
 
+# 백업 칸의 refresh token 이 만료됐으면 macOS 알림을 한 번 보냄.
+# access token 만료는 알리지 않음 — 쉬는 계정은 약 8시간이면 늘 만료 상태이고
+# --refresh 나 전환으로 되살아남. refresh 만료는 /login 후 --add-account 말고는 복구 불가.
+# 만료 전 무효화(다른 곳에서 회전·로그아웃)는 만료 시각만으로는 알 수 없음.
+notify_refresh_expired() {
+    local num="$1" email="$2" cred="$3"
+    local refresh_ms
+    refresh_ms=$(jq -r '.claudeAiOauth.refreshTokenExpiresAt // 0' <<<"$cred" 2>/dev/null || echo 0)
+    [[ "$refresh_ms" =~ ^[0-9]+$ ]] && (( refresh_ms > 0 && refresh_ms / 1000 <= $(date +%s) )) || return 0
+    command -v terminal-notifier >/dev/null 2>&1 || command -v osascript >/dev/null 2>&1 || return 0
+
+    # 풀이 지금 쓰는 계정은 Claude Code 가 live 저장소에서 갱신하므로 백업 칸 시각과 무관.
+    local p
+    for p in $(pool_names); do
+        [[ "$(pool_current_account "$p" 2>/dev/null || true)" == "$num" ]] && return 0
+    done
+
+    # 같은 refresh token 은 한 번만 — 재로그인으로 토큰이 바뀌면 다시 알림 대상.
+    # 전송이 실패해도 기록은 남김: LaunchAgent 처럼 알림 권한이 없는 곳에서 매분 재시도하지 않게.
+    # 원문 토큰은 저장하지 않음.
+    local hash marker_dir marker
+    hash=$(jq -r '.claudeAiOauth.refreshToken // ""' <<<"$cred" 2>/dev/null | shasum -a 256 | cut -c1-64) || return 0
+    marker_dir="$BACKUP_DIR/expiry-notified"
+    marker="$marker_dir/account-$num"
+    [[ -f "$marker" && "$(cat "$marker" 2>/dev/null)" == "$hash" ]] && return 0
+    mkdir -p "$marker_dir" && printf '%s\n' "$hash" > "$marker" || return 0
+
+    local org_name org_uuid label msg title="Claude Code 로그인 만료"
+    org_name=$(jq -r --arg n "$num" '.accounts[$n].organizationName // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_name=""
+    org_uuid=$(jq -r --arg n "$num" '.accounts[$n].organizationUuid // ""' "$SEQUENCE_FILE" 2>/dev/null) || org_uuid=""
+    label="Account-$num $email"
+    if [[ -n "$org_name$org_uuid" ]]; then
+        label+=" ($(format_org_label "$org_name" "$org_uuid" "$email"))"
+    fi
+    msg="$label 의 로그인(refresh token)이 만료되었습니다. 이 계정으로 /login 한 뒤 ccswitch.sh --add-account 로 다시 등록해 주세요."
+
+    if command -v terminal-notifier >/dev/null 2>&1; then
+        terminal-notifier -title "$title" -message "$msg" -sound default >/dev/null 2>&1 || true
+    else
+        osascript - "$msg" "$title" >/dev/null 2>&1 <<'APPLESCRIPT' || true
+on run argv
+    display notification (item 1 of argv) with title (item 2 of argv) sound name "default"
+end run
+APPLESCRIPT
+    fi
+    return 0
+}
+
 # Format a short organization label.
 # Strategy: strip trailing "'s Organization"; if result is empty or collides
 # with the account email, fall back to the first 8 chars of organizationUuid.
@@ -541,6 +589,41 @@ creds_expires_at() {
     local e
     e=$(jq -r '.claudeAiOauth.expiresAt // 0' <<<"$1" 2>/dev/null || echo 0)
     [[ "$e" =~ ^[0-9]+$ ]] && echo "$e" || echo 0
+}
+
+# 남은 시간(초) → "7h" / "27d" / "<1h". 음수면 "만료(12h 전)".
+format_token_remaining() {
+    local s="$1" a
+    a=$(( s < 0 ? -s : s ))
+    local d
+    if (( a >= 172800 )); then d="$(( a / 86400 ))d"
+    elif (( a >= 3600 )); then d="$(( a / 3600 ))h"
+    else d="<1h"
+    fi
+    (( s < 0 )) && echo "만료(${d} 전)" || echo "$d"
+}
+
+# --list 의 토큰 열. API 호출 없이 자격증명의 만료 시각만 읽음.
+# access 만료는 흔한 상태(쉬는 계정은 약 8시간이면 만료) — --refresh 나 전환으로 되살아남.
+# refresh 만료는 /login 후 --add-account 말고는 복구 불가.
+token_status_label() {
+    local cred="$1" now access_ms refresh_ms refresh_part
+    now=$(date +%s)
+    access_ms=$(creds_expires_at "$cred")
+    refresh_ms=$(jq -r '.claudeAiOauth.refreshTokenExpiresAt // 0' <<<"$cred" 2>/dev/null || echo 0)
+    [[ "$refresh_ms" =~ ^[0-9]+$ ]] || refresh_ms=0
+    if (( refresh_ms == 0 )); then
+        refresh_part="refresh ?"
+    elif (( refresh_ms / 1000 <= now )); then
+        refresh_part="refresh 만료 — /login 후 --add-account"
+    else
+        refresh_part="refresh $(format_token_remaining $(( refresh_ms / 1000 - now )))"
+    fi
+    if (( access_ms == 0 )); then
+        echo "access ? · $refresh_part"
+    else
+        echo "access $(format_token_remaining $(( access_ms / 1000 - now ))) · $refresh_part"
+    fi
 }
 
 # 토큰의 실제 주인 → "accountUuid<TAB>organizationUuid". 만료·폐기·네트워크 실패면 빈 값.
@@ -1131,6 +1214,7 @@ gather_all_usage() {
         local cred_cached config_backup
         cred_cached=$(read_account_credentials "$num" "$email")
         config_backup="$BACKUP_DIR/configs/.claude-config-${num}-${email}.json"
+        notify_refresh_expired "$num" "$email" "$cred_cached"
         if [[ ! -s "$config_backup" || -z "${cred_cached//[[:space:]]/}" ]]; then
             # 전환 불가 계정. 캐시 추정치로 채우면 "5h=0/7d=0" 처럼 보여 picker 가
             # 최우선으로 고른 뒤 perform_switch 에서 죽는다. 아예 후보에서 뺀다.
@@ -1762,6 +1846,7 @@ cmd_remove_account() {
             ;;
     esac
     rm -f "$BACKUP_DIR/configs/.claude-config-${account_num}-${email}.json"
+    rm -f "$BACKUP_DIR/expiry-notified/account-${account_num}"
     
     # Update sequence.json
     local updated_sequence
@@ -1850,6 +1935,13 @@ cmd_list() {
     fi
     echo ""
 
+    # 풀마다 지금 쓰는 계정은 Claude Code 가 live 저장소에서 갱신 — 백업 칸 만료 시각은 무의미.
+    local in_use=" " p pn
+    for p in $(pool_names); do
+        pn=$(pool_current_account "$p" 2>/dev/null || true)
+        [[ -n "$pn" ]] && in_use+="$pn "
+    done
+
     echo "Accounts:"
     local seq_nums
     seq_nums=$(jq -r '.sequence[]' "$SEQUENCE_FILE")
@@ -1875,7 +1967,19 @@ cmd_list() {
             suffix=""
         fi
 
-        echo "${prefix}${num}: $email ($label)${suffix}"
+        local cred token
+        if [[ "$in_use" == *" $num "* ]]; then
+            token="사용 중"
+        else
+            cred=$(read_account_credentials "$num" "$email")
+            if [[ -z "${cred//[[:space:]]/}" ]]; then
+                token="백업 없음"
+            else
+                token=$(token_status_label "$cred")
+            fi
+        fi
+
+        echo "${prefix}${num}: $email ($label)${suffix}  [$token]"
     done <<< "$seq_nums"
     print_pools_line
 }
@@ -3557,7 +3661,7 @@ show_usage() {
     echo "  --pool-remove <name>                       풀 삭제 (로그인 정보는 백업 칸으로 되돌림)"
     echo "  --add-account                              Add current account to managed accounts"
     echo "  --remove-account <num>                     Remove account (number only, see --list)"
-    echo "  --list                                     List all managed accounts"
+    echo "  --list                                     List all managed accounts (with token expiry)"
     echo "  --switch                                   Rotate to next account in sequence"
     echo "  --switch-to <num|email|\"email (org)\">       Switch to specific account"
     echo "  --switch-lowest                            Switch to the account with lowest adjusted utilization"
